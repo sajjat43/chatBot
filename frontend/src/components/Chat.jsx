@@ -1,8 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import '../styles/Chat.css';
+import { ENDPOINTS } from '../config';
 
-const API_URL = 'http://localhost:5001/api/chat';
-const TIMEOUT_DURATION = 30000; // 30 seconds timeout
+const TIMEOUT_DURATION = 650000; // 65 seconds timeout (slightly longer than backend)
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 1000; // 1 second
 
 const Chat = () => {
   const [messages, setMessages] = useState([]);
@@ -19,7 +21,7 @@ const Chat = () => {
     scrollToBottom();
   }, [messages]);
 
-  const sendMessage = async (text) => {
+  const sendMessage = async (text, retryCount = 0) => {
     if (loading) return;
     
     setLoading(true);
@@ -33,7 +35,7 @@ const Chat = () => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_DURATION);
 
-      const response = await fetch(API_URL, {
+      const response = await fetch(ENDPOINTS.CHAT, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -44,19 +46,41 @@ const Chat = () => {
 
       clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        throw new Error(`Server responded with ${response.status}`);
+      const data = await response.json();
+      
+      // Check if the response contains an error
+      if (data.error) {
+        throw new Error(data.message || data.error);
       }
 
-      const data = await response.json();
+      // Check if response is empty
+      if (!data.response) {
+        throw new Error('Empty response from server');
+      }
+
       setMessages(prev => [...prev, { text: data.response, sender: 'bot' }]);
     } catch (err) {
+      console.error('Error in sendMessage:', err);
+      
       if (err.name === 'AbortError') {
-        setError('Request timed out. Please try again.');
+        if (retryCount < MAX_RETRIES) {
+          console.log(`Retrying request (${retryCount + 1}/${MAX_RETRIES})...`);
+          setError(`Request timed out. Retrying... (${retryCount + 1}/${MAX_RETRIES})`);
+          
+          // Wait before retrying
+          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+          
+          // Retry the request
+          return sendMessage(text, retryCount + 1);
+        } else {
+          setError('Request timed out after multiple retries. Please try again.');
+        }
       } else {
         setError(err.message || 'Failed to get response. Please try again.');
       }
-      console.error('Error in sendMessage:', err);
+      
+      // Remove the user's message if all retries failed
+      setMessages(prev => prev.slice(0, -1));
     } finally {
       setLoading(false);
     }

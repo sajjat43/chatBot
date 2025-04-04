@@ -6,10 +6,15 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 5001;
+const PORT = 5001;
 
-// Middleware
-app.use(cors());
+// Configure CORS
+app.use(cors({
+  origin: 'http://localhost:5173', // Your frontend URL
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type']
+}));
+
 app.use(express.json());
 
 // Debug middleware to log all requests
@@ -50,11 +55,7 @@ app.get('/api', (req, res) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({
-    status: ollamaReady ? 'ok' : 'error',
-    modelLoaded: modelLoaded,
-    message: ollamaReady ? 'Service is ready' : 'Service is not ready'
-  });
+  res.json({ status: 'ok' });
 });
 
 // Main chat endpoint with simplified error handling
@@ -71,121 +72,104 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    // Force check Ollama before proceeding
-    const ollamaStatus = await checkOllamaAsync();
-    if (!ollamaStatus) {
-      return res.status(503).json({
-        error: 'Service Unavailable',
-        message: 'Ollama service is not ready'
-      });
-    }
+    // Update timeout to 60 seconds
+    const timeout = 600000;
 
-    // Set a timeout for the Ollama process
-    const timeout = 25000; // 25 seconds
-    let timeoutId;
+    // Modified executeOllama function
+    const executeOllama = () => {
+      return new Promise((resolve, reject) => {
+        const child = spawn('ollama', ['run', 'deepseek-r1:14b'], {
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
 
-    const child = spawn('ollama', ['run', 'deepseek-r1:14b'], {
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
+        let response = '';
+        let error = '';
 
-    const killProcess = () => {
-      if (child.killed) return;
-      child.kill();
-      res.status(504).json({
-        error: 'Gateway Timeout',
-        message: 'Request timed out'
+        // Handle stdout in chunks
+        child.stdout.on('data', (data) => {
+          response += data.toString();
+        });
+
+        child.stderr.on('data', (data) => {
+          console.error('Ollama stderr:', data.toString());
+          error += data.toString();
+        });
+
+        child.on('error', (err) => {
+          console.error('Spawn error:', err);
+          reject(err);
+        });
+
+        // Handle process completion
+        child.on('close', (code) => {
+          console.log('Ollama process closed with code:', code);
+          console.log('Final response:', response);
+          if (code === 0) {
+            resolve(response);
+          } else {
+            reject(new Error(`Process exited with code ${code}: ${error}`));
+          }
+        });
+
+        // Write the message and add a clear EOF marker
+        child.stdin.write(message + '\n');
+        child.stdin.end();
+
+        // Set timeout
+        const timeoutId = setTimeout(() => {
+          if (!child.killed) {
+            child.kill();
+            reject(new Error('Operation timed out'));
+          }
+        }, timeout);
+
+        // Clear timeout if process ends normally
+        child.on('close', () => clearTimeout(timeoutId));
       });
     };
 
-    timeoutId = setTimeout(killProcess, timeout);
+    // Execute the Ollama command
+    const response = await executeOllama();
+    
+    // Clean up the response and ensure it's not empty
+    const cleanedResponse = response
+      .replace(/<think>/g, '')
+      .replace(/<\/think>/g, '')
+      .trim();
 
-    child.stdin.write(message + '\n');
-    child.stdin.end();
+    if (!cleanedResponse) {
+      throw new Error('Empty response from model');
+    }
 
-    let response = '';
-
-    child.stdout.on('data', (data) => {
-      response += data.toString();
-    });
-
-    child.on('close', (code) => {
-      clearTimeout(timeoutId);
-      
-      if (code === 0) {
-        res.json({ response: response.trim() });
-      } else {
-        res.status(500).json({
-          error: 'Server Error',
-          message: 'Failed to process request'
-        });
-      }
-    });
-
-    child.on('error', (error) => {
-      clearTimeout(timeoutId);
-      console.error('Child process error:', error);
-      res.status(500).json({
-        error: 'Server Error',
-        message: 'Failed to start model process'
-      });
-    });
+    // Send the response
+    res.json({ response: cleanedResponse });
 
   } catch (error) {
     console.error('Chat error:', error);
-    res.status(500).json({
-      error: 'Server Error',
-      message: error.message
-    });
+    
+    if (!res.headersSent) {
+      const statusCode = error.message.includes('timed out') ? 504 : 500;
+      res.status(statusCode).json({
+        error: 'Server Error',
+        message: error.message || 'Failed to process request'
+      });
+    }
   }
 });
 
-// Add file upload endpoint
-app.post('/api/upload', upload.single('file'), async (req, res) => {
+// File upload endpoint
+app.post('/api/upload', upload.single('file'), (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
-
-    const fileContent = fs.readFileSync(req.file.path, 'utf8');
-    
-    // Create a prompt for Ollama to analyze the file
-    const prompt = `Please analyze this file content and provide a summary:\n\n${fileContent}`;
-    
-    const child = spawn('ollama', ['run', 'mistral', prompt], {
-      env: { ...process.env, OLLAMA_HOST: 'http://localhost:11434' }
+    res.json({ 
+      message: 'File uploaded successfully',
+      filename: req.file.filename 
     });
-
-    let analysis = '';
-    let errorOutput = '';
-
-    child.stdout.on('data', (data) => {
-      analysis += data.toString();
-    });
-
-    child.stderr.on('data', (data) => {
-      errorOutput += data.toString();
-    });
-
-    child.on('close', (code) => {
-      // Clean up the uploaded file
-      fs.unlinkSync(req.file.path);
-      
-      if (code === 0 && analysis) {
-        res.json({ analysis: analysis.trim() });
-      } else {
-        res.status(500).json({ 
-          error: 'Analysis failed',
-          message: errorOutput || 'Failed to analyze file'
-        });
-      }
-    });
-
   } catch (error) {
     console.error('Upload error:', error);
-    res.status(500).json({ 
-      error: 'Server Error',
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Upload failed' });
   }
 });
 
@@ -198,9 +182,9 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start server
+// Start the server
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
   // Initial Ollama check
   checkOllamaAsync();
 }).on('error', (err) => {
@@ -218,41 +202,18 @@ app.listen(PORT, () => {
 });
 
 // Async function to check Ollama status
-async function checkOllamaAsync() {
-  return new Promise((resolve) => {
-    console.log('Checking Ollama status...');
-    
-    const check = spawn('ollama', ['list']);
-    let output = '';
-    
-    check.stdout.on('data', (data) => {
-      output += data.toString();
-      console.log('Available models:', output);
-      
-      // Changed to check for deepseek-r1:14b
-      if (output.includes('deepseek-r1:14b')) {
-        ollamaReady = true;
-        modelLoaded = true;
-        console.log('✅ Ollama is ready with deepseek-r1:14b model');
-      } else {
-        console.log('❌ deepseek-r1:14b model not found');
-        // Try to pull the model if not found
-        pullDeepseekModel();
-      }
+const checkOllamaAsync = async () => {
+  try {
+    const child = spawn('ollama', ['list']);
+    return new Promise((resolve) => {
+      child.on('close', (code) => {
+        resolve(code === 0);
+      });
     });
-
-    check.on('close', (code) => {
-      resolve(code === 0);
-    });
-
-    check.on('error', (error) => {
-      console.error('Failed to check Ollama:', error);
-      ollamaReady = false;
-      modelLoaded = false;
-      resolve(false);
-    });
-  });
-}
+  } catch (error) {
+    return false;
+  }
+};
 
 // Function to pull the Deepseek model
 function pullDeepseekModel() {

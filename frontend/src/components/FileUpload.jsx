@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import '../styles/FileUpload.css';
+import { ENDPOINTS } from '../config';
 
 const FileUpload = () => {
   const [file, setFile] = useState(null);
@@ -38,24 +39,12 @@ const FileUpload = () => {
     e.preventDefault();
     if (!file) return;
 
-    const formData = new FormData();
-    formData.append('file', file);
     setLoading(true);
     setError('');
     setAnalysis('');
 
     try {
-      const response = await fetch('http://localhost:5000/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const data = await response.json();
-      
-      if (!response.ok) {
-        throw new Error(data.message || 'Failed to upload file');
-      }
-
+      const data = await handleFileUploadHelper(file);
       setAnalysis(data.analysis);
     } catch (error) {
       console.error('Error:', error);
@@ -63,6 +52,23 @@ const FileUpload = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleFileUploadHelper = async (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch(ENDPOINTS.UPLOAD, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Upload failed with status ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data;
   };
 
   return (
