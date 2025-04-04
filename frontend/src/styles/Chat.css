@@ -23,18 +23,26 @@
 }
 
 .message-container {
-  display: flex;
-  width: 100%;
+  padding: 12px 16px;
+  margin: 8px 0;
+  border-radius: 8px;
+  max-width: 85%;
 }
 
 .message-container.user {
-  justify-content: flex-end;
+  background-color: #007bff;
+  color: white;
+  margin-left: auto;
+}
+
+.message-container.bot {
+  background-color: #f8f9fa;
+  color: #2c3e50;
+  margin-right: auto;
 }
 
 .message {
-  max-width: 70%;
-  padding: 12px 16px;
-  border-radius: 12px;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-wrap: break-word;
 }
@@ -142,4 +150,104 @@
 
 .chat-messages::-webkit-scrollbar-thumb:hover {
   background: #555;
+}
+
+/* Add these new styles to your existing CSS */
+
+.message-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  font-size: 0.9em;
+}
+
+.sender {
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.timestamp {
+  color: #7f8c8d;
+  font-size: 0.8em;
+}
+
+.message-container.user .sender,
+.message-container.user .timestamp {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.typing-indicator {
+  display: flex;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.typing-indicator span {
+  width: 8px;
+  height: 8px;
+  background: #007bff;
+  border-radius: 50%;
+  animation: bounce 1.5s infinite;
+}
+
+.typing-indicator span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-indicator span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-4px);
+  }
+}
+
+/* Add these new styles for code blocks */
+.code-block-container {
+  margin: 8px 0;
+  background: #1e1e1e;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.code-header {
+  background: #333;
+  padding: 8px 16px;
+  color: #fff;
+  font-size: 0.9em;
+  font-family: monospace;
+  border-bottom: 1px solid #444;
+}
+
+.language-label {
+  text-transform: capitalize;
+}
+
+/* Adjust message containers that contain code */
+.message-container.bot .code-block-container {
+  background: #1e1e1e;
+  color: #fff;
+}
+
+.message-container.user .code-block-container {
+  background: #1e1e1e;
+  color: #fff;
+}
+
+/* Make code blocks take full width of message */
+.message .code-block-container {
+  width: 100%;
+  max-width: 100%;
+}
+
+/* Adjust syntax highlighter styles */
+pre {
+  margin: 0 !important;
+  border-radius: 0 0 4px 4px !important;
 }
