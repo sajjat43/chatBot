@@ -55,13 +55,151 @@ const MessageContent = ({ text }) => {
   return <div className="message">{detectAndFormatCode(text)}</div>;
 };
 
+const UploadIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+  </svg>
+);
+
 const Chat = () => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [streamingText, setStreamingText] = useState('');
+  const [file, setFile] = useState(null);
   const messagesEndRef = useRef(null);
+
+  const allowedTypes = [
+    'application/pdf',
+    'text/plain',
+    'text/csv',
+    'application/vnd.oasis.opendocument.text',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  ];
+
+  const handleFileChange = async (e) => {
+    const selectedFile = e.target.files[0];
+    setError(null);
+    
+    if (!selectedFile) return;
+
+    if (!allowedTypes.includes(selectedFile.type)) {
+      setError('Please upload a PDF, TXT, CSV, or ODT file');
+      setFile(null);
+      return;
+    }
+    
+    if (selectedFile.size > 10 * 1024 * 1024) {
+      setError('File size must be less than 10MB');
+      setFile(null);
+      return;
+    }
+
+    setFile(selectedFile);
+    await handleFileUpload(selectedFile);
+  };
+
+  const handleFileUpload = async (selectedFile) => {
+    if (!selectedFile) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+
+      setMessages(prev => [...prev, {
+        sender: 'system',
+        text: `Analyzing file: ${selectedFile.name}...`
+      }]);
+
+      const response = await fetch(ENDPOINTS.UPLOAD, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      setMessages(prev => [...prev, {
+        sender: 'bot',
+        text: data.analysis || data.message
+      }]);
+    } catch (error) {
+      console.error('Error:', error);
+      setError(error.message || 'Failed to upload and analyze file');
+      // Remove the "analyzing" message if there was an error
+      setMessages(prev => prev.filter(msg => msg.text !== `Analyzing file: ${selectedFile.name}...`));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const sendMessage = async (text) => {
+    if (loading) return;
+    
+    setLoading(true);
+    setError(null);
+    setStreamingText('');
+
+    const userMessage = { text, sender: 'user' };
+    setMessages(prev => [...prev, userMessage]);
+    setInput('');
+
+    try {
+      let endpoint = ENDPOINTS.CHAT;
+      let body = { message: text };
+
+      // If there's a file, use the analyze endpoint instead
+      if (file) {
+        endpoint = ENDPOINTS.ANALYZE;
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('prompt', text);
+        body = formData;
+      }
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        body: file ? body : JSON.stringify(body),
+        headers: file ? {} : {
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      setMessages(prev => [...prev, {
+        text: data.response || data.analysis,
+        sender: 'bot'
+      }]);
+    } catch (err) {
+      console.error('Error in sendMessage:', err);
+      setError(err.message || 'Failed to get response');
+      setMessages(prev => prev.slice(0, -1));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!input.trim()) return;
+    await sendMessage(input.trim());
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -71,107 +209,6 @@ const Chat = () => {
     scrollToBottom();
   }, [messages]);
 
-  const streamResponse = (response) => {
-    return new Promise((resolve) => {
-      const words = response.split(' ');
-      let currentIndex = 0;
-      
-      const streamInterval = setInterval(() => {
-        if (currentIndex < words.length) {
-          setStreamingText(prev => prev + (prev ? ' ' : '') + words[currentIndex]);
-          currentIndex++;
-        } else {
-          clearInterval(streamInterval);
-          resolve();
-        }
-      }, 50); // Adjust speed here (lower = faster)
-    });
-  };
-
-  const sendMessage = async (text, retryCount = 0) => {
-    if (loading) return;
-    
-    setLoading(true);
-    setError(null);
-    setStreamingText('');
-    
-    const userMessage = { 
-      text, 
-      sender: 'user',
-      timestamp: new Date().toLocaleTimeString()
-    };
-    setMessages(prev => [...prev, userMessage]);
-    setInput('');
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_DURATION);
-
-      const response = await fetch(ENDPOINTS.CHAT, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ message: text }),
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      const data = await response.json();
-      
-      if (data.error) {
-        throw new Error(data.message || data.error);
-      }
-
-      if (!data.response) {
-        throw new Error('Empty response from server');
-      }
-
-      // Stream the response
-      await streamResponse(data.response);
-      
-      // After streaming is complete, add the message
-      setMessages(prev => [...prev, { 
-        text: data.response, 
-        sender: 'bot',
-        timestamp: new Date().toLocaleTimeString()
-      }]);
-      setStreamingText('');
-    } catch (err) {
-      console.error('Error in sendMessage:', err);
-      
-      if (err.name === 'AbortError') {
-        if (retryCount < MAX_RETRIES) {
-          console.log(`Retrying request (${retryCount + 1}/${MAX_RETRIES})...`);
-          setError(`Request timed out. Retrying... (${retryCount + 1}/${MAX_RETRIES})`);
-          
-          // Wait before retrying
-          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-          
-          // Retry the request
-          return sendMessage(text, retryCount + 1);
-        } else {
-          setError('Request timed out after multiple retries. Please try again.');
-        }
-      } else {
-        setError(err.message || 'Failed to get response. Please try again.');
-      }
-      
-      // Remove the user's message if all retries failed
-      setMessages(prev => prev.slice(0, -1));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleKeyPress = async (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && input.trim()) {
-      e.preventDefault();
-      await sendMessage(input.trim());
-    }
-  };
-
   return (
     <div className="chat-container">
       <div className="messages-wrapper">
@@ -179,23 +216,21 @@ const Chat = () => {
           {messages.map((message, index) => (
             <div
               key={index}
-              className={`message-container ${message.sender === 'user' ? 'user' : 'bot'}`}
+              className={`message-container ${message.sender}`}
             >
-              <MessageContent text={message.text} />
+              <div className="message">
+                {message.text}
+              </div>
             </div>
           ))}
           {loading && (
             <div className="message-container bot">
               <div className="message">
-                {streamingText ? (
-                  <MessageContent text={streamingText} />
-                ) : (
-                  <div className="typing-indicator">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                  </div>
-                )}
+                <div className="typing-indicator">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </div>
               </div>
             </div>
           )}
@@ -207,25 +242,39 @@ const Chat = () => {
           <div ref={messagesEndRef} />
         </div>
       </div>
-      
-      <div className="input-container">
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyPress={handleKeyPress}
-          placeholder="Type your message..."
-          disabled={loading}
-          rows="1"
-          className="chat-input"
-        />
-        <button 
-          onClick={() => input.trim() && sendMessage(input.trim())}
-          disabled={!input.trim() || loading}
-          className="send-button"
-        >
+
+      <form onSubmit={handleSubmit} className="input-container">
+        <div className="input-wrapper">
+          <input
+            type="file"
+            onChange={handleFileChange}
+            className="file-input"
+            accept=".pdf,.txt,.csv,.odt,.doc,.docx"
+            id="file-upload"
+          />
+          <label htmlFor="file-upload" className="file-upload-label" title={file ? file.name : 'Upload file'}>
+            <UploadIcon />
+          </label>
+          
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyPress={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSubmit(e);
+              }
+            }}
+            placeholder={file ? "Ask questions about the file..." : "Type your message..."}
+            rows="1"
+            className="chat-input"
+            disabled={loading}
+          />
+        </div>
+        <button type="submit" disabled={!input.trim() || loading}>
           Send
         </button>
-      </div>
+      </form>
     </div>
   );
 };
