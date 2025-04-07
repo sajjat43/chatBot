@@ -3,6 +3,7 @@ const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 
@@ -21,13 +22,18 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
+// Add file tracking storage
+const uploadedFiles = new Map();
+
 // Configure multer for file upload
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, uploadDir);
   },
   filename: function (req, file, cb) {
-    cb(null, Date.now() + '-' + file.originalname);
+    const fileId = crypto.randomUUID();
+    const ext = path.extname(file.originalname);
+    cb(null, `${fileId}${ext}`);
   }
 });
 
@@ -137,13 +143,7 @@ app.get('/api/health', (req, res) => {
 // Updated upload endpoint with better error handling
 app.post('/api/upload', async (req, res) => {
   try {
-    // Handle file upload
-    await new Promise((resolve, reject) => {
-      upload.single('file')(req, res, (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    await uploadMiddleware(req, res);
 
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -151,30 +151,28 @@ app.post('/api/upload', async (req, res) => {
 
     // Read file content
     const fileContent = await fs.promises.readFile(req.file.path, 'utf8');
+    
+    // Store file information
+    const fileInfo = {
+      id: path.parse(req.file.filename).name,
+      originalName: req.file.originalname,
+      path: req.file.path,
+      content: fileContent,
+      uploadDate: new Date().toISOString()
+    };
+    
+    uploadedFiles.set(fileInfo.id, fileInfo);
 
-    // Process with Ollama
-    const ollamaResponse = await fetch('http://localhost:11434/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'llama2',
-        prompt: `Analyze this file content:\n\n${fileContent}`,
-        stream: false
-      })
-    });
-
-    if (!ollamaResponse.ok) {
-      throw new Error('Failed to process file with AI');
-    }
-
-    const ollamaData = await ollamaResponse.json();
-
-    // Clean up the uploaded file
-    await fs.promises.unlink(req.file.path);
+    // Initial analysis with Ollama
+    const ollamaResponse = await executeOllama(
+      `Analyze this file content and provide a brief summary:\n\n${fileContent}`
+    );
 
     res.json({
       success: true,
-      analysis: ollamaData.response,
+      fileId: fileInfo.id,
+      fileName: fileInfo.originalName,
+      analysis: ollamaResponse,
       message: 'File processed successfully'
     });
 
@@ -186,15 +184,35 @@ app.post('/api/upload', async (req, res) => {
   }
 });
 
-// Chat endpoint
+// Add endpoint to list uploaded files
+app.get('/api/files', (req, res) => {
+  const files = Array.from(uploadedFiles.values()).map(file => ({
+    id: file.id,
+    name: file.originalName,
+    uploadDate: file.uploadDate
+  }));
+  res.json(files);
+});
+
+// Update chat endpoint to include file context
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, fileId } = req.body;
     if (!message) {
       return res.status(400).json({ error: 'Message is required' });
     }
 
-    const response = await executeOllama(message);
+    let prompt = message;
+    
+    // If fileId is provided, include file content in the context
+    if (fileId) {
+      const fileInfo = uploadedFiles.get(fileId);
+      if (fileInfo) {
+        prompt = `Context from file "${fileInfo.originalName}":\n${fileInfo.content}\n\nUser question: ${message}`;
+      }
+    }
+
+    const response = await executeOllama(prompt);
     res.json({ response });
 
   } catch (error) {
