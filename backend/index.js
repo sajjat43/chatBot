@@ -31,18 +31,51 @@ const storage = multer.diskStorage({
   }
 });
 
+// Updated file filter with more mime types and better validation
 const fileFilter = (req, file, cb) => {
   const allowedTypes = [
     'text/plain',
     'text/csv',
     'application/json',
-    'text/markdown'
+    'text/markdown',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/msword',
+    'application/pdf',
+    'text/javascript',
+    'application/javascript',
+    'text/html',
+    'text/css',
+    'application/x-httpd-php',
+    'text/x-python',
+    'text/x-java',
+    'text/x-c',
+    'text/x-c++',
+    'text/xml',
+    'application/xml',
+    'text/x-ruby',
+    'text/x-php',
+    'text/x-sql',
+    'application/sql',
+    // Add common code file extensions
+    'text/x-typescript',
+    'text/jsx',
+    'text/tsx'
   ];
 
-  if (allowedTypes.includes(file.mimetype)) {
+  // Check file extension as fallback
+  const allowedExtensions = [
+    '.txt', '.csv', '.json', '.md', '.doc', '.docx', 
+    '.pdf', '.js', '.html', '.css', '.php', '.py', 
+    '.java', '.c', '.cpp', '.xml', '.rb', '.sql',
+    '.ts', '.jsx', '.tsx'
+  ];
+
+  const ext = path.extname(file.originalname).toLowerCase();
+  
+  if (allowedTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type. Only TXT, CSV, JSON, and MD files are allowed.'));
+    cb(new Error(`Invalid file type. Allowed types are: ${allowedExtensions.join(', ')}`));
   }
 };
 
@@ -53,6 +86,21 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024 // 10MB limit
   }
 });
+
+// Wrap multer upload in a promise with better error handling
+const uploadMiddleware = (req, res) => {
+  return new Promise((resolve, reject) => {
+    upload.single('file')(req, res, (err) => {
+      if (err instanceof multer.MulterError) {
+        reject(new Error(`Upload error: ${err.message}`));
+      } else if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+};
 
 // Helper function to execute Ollama
 async function executeOllama(prompt) {
@@ -86,33 +134,55 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// File upload endpoint
-app.post('/api/upload', upload.single('file'), async (req, res) => {
+// Updated upload endpoint with better error handling
+app.post('/api/upload', async (req, res) => {
   try {
+    // Handle file upload
+    await new Promise((resolve, reject) => {
+      upload.single('file')(req, res, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    // Read the file content
+    // Read file content
     const fileContent = await fs.promises.readFile(req.file.path, 'utf8');
-    
-    // Generate analysis prompt
-    const analysisPrompt = `Analyze this ${req.file.originalname} file and provide a brief summary:\n\n${fileContent}`;
-    
-    // Get AI response
-    const analysis = await executeOllama(analysisPrompt);
 
-    // Clean up: delete the uploaded file
+    // Process with Ollama
+    const ollamaResponse = await fetch('http://localhost:11434/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'llama2',
+        prompt: `Analyze this file content:\n\n${fileContent}`,
+        stream: false
+      })
+    });
+
+    if (!ollamaResponse.ok) {
+      throw new Error('Failed to process file with AI');
+    }
+
+    const ollamaData = await ollamaResponse.json();
+
+    // Clean up the uploaded file
     await fs.promises.unlink(req.file.path);
 
-    res.json({ 
-      analysis: analysis,
-      message: 'File uploaded and analyzed successfully' 
+    res.json({
+      success: true,
+      analysis: ollamaData.response,
+      message: 'File processed successfully'
     });
 
   } catch (error) {
     console.error('Upload error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      error: error.message || 'Failed to process file'
+    });
   }
 });
 

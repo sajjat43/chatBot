@@ -1,59 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
 import '../styles/Chat.css';
-import { ENDPOINTS } from '../config';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-
-const TIMEOUT_DURATION = 650000; // 65 seconds timeout (slightly longer than backend)
-const MAX_RETRIES = 3;
-const RETRY_DELAY = 1000; // 1 second
-
-const MessageContent = ({ text }) => {
-  // Function to detect if text is code and what language it might be
-  const isCodeBlock = (text) => {
-    const codePatterns = {
-      javascript: /^(const|let|var|function|class|import|export|return|if|for|while)/m,
-      python: /^(def|class|import|from|if|for|while|return)/m,
-      html: /^(<html|<div|<body|<head|<!DOCTYPE)/m,
-      css: /^(\.|#|body|html|@media|@import)/m,
-      json: /^[\s]*[{[]/m
-    };
-
-    for (const [language, pattern] of Object.entries(codePatterns)) {
-      if (pattern.test(text.trim())) {
-        return language;
-      }
-    }
-    return null;
-  };
-
-  const detectAndFormatCode = (text) => {
-    const language = isCodeBlock(text);
-    if (language) {
-      return (
-        <div className="code-block-container">
-          <div className="code-header">
-            <span className="language-label">{language}</span>
-          </div>
-          <SyntaxHighlighter
-            language={language}
-            style={vscDarkPlus}
-            customStyle={{
-              margin: 0,
-              borderRadius: '0 0 4px 4px',
-              padding: '1em'
-            }}
-          >
-            {text}
-          </SyntaxHighlighter>
-        </div>
-      );
-    }
-    return <span>{text}</span>;
-  };
-
-  return <div className="message">{detectAndFormatCode(text)}</div>;
-};
 
 const UploadIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -66,39 +12,16 @@ const Chat = () => {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [streamingText, setStreamingText] = useState('');
   const [file, setFile] = useState(null);
   const messagesEndRef = useRef(null);
 
-  const allowedTypes = [
-    'application/pdf',
-    'text/plain',
-    'text/csv',
-    'application/vnd.oasis.opendocument.text',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-  ];
-
-  const handleFileChange = async (e) => {
-    const selectedFile = e.target.files[0];
-    setError(null);
-    
-    if (!selectedFile) return;
-
-    if (!allowedTypes.includes(selectedFile.type)) {
-      setError('Please upload a PDF, TXT, CSV, or ODT file');
-      setFile(null);
-      return;
-    }
-    
-    if (selectedFile.size > 10 * 1024 * 1024) {
-      setError('File size must be less than 10MB');
-      setFile(null);
-      return;
-    }
-
-    setFile(selectedFile);
-    await handleFileUpload(selectedFile);
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
 
   const handleFileUpload = async (selectedFile) => {
     if (!selectedFile) return;
@@ -112,102 +35,90 @@ const Chat = () => {
 
       setMessages(prev => [...prev, {
         sender: 'system',
-        text: `Analyzing file: ${selectedFile.name}...`
+        text: `Processing file: ${selectedFile.name}...`
       }]);
 
-      const response = await fetch(ENDPOINTS.UPLOAD, {
+      const response = await fetch('http://localhost:5001/api/upload', {
         method: 'POST',
         body: formData,
       });
 
       if (!response.ok) {
-        throw new Error(`Upload failed: ${response.statusText}`);
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Upload failed');
       }
 
       const data = await response.json();
-      
-      if (data.error) {
-        throw new Error(data.error);
-      }
+
+      setMessages(prev => prev.filter(msg => 
+        msg.text !== `Processing file: ${selectedFile.name}...`
+      ));
 
       setMessages(prev => [...prev, {
         sender: 'bot',
-        text: data.analysis || data.message
+        text: data.analysis || 'File processed successfully'
       }]);
+
     } catch (error) {
-      console.error('Error:', error);
-      setError(error.message || 'Failed to upload and analyze file');
-      // Remove the "analyzing" message if there was an error
-      setMessages(prev => prev.filter(msg => msg.text !== `Analyzing file: ${selectedFile.name}...`));
+      console.error('Upload error:', error);
+      setError(error.message || 'Failed to upload file');
+      
+      setMessages(prev => prev.filter(msg => 
+        msg.text !== `Processing file: ${selectedFile.name}...`
+      ));
     } finally {
       setLoading(false);
     }
   };
 
-  const sendMessage = async (text) => {
-    if (loading) return;
-    
-    setLoading(true);
-    setError(null);
-    setStreamingText('');
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
 
-    const userMessage = { text, sender: 'user' };
-    setMessages(prev => [...prev, userMessage]);
-    setInput('');
-
-    try {
-      let endpoint = ENDPOINTS.CHAT;
-      let body = { message: text };
-
-      // If there's a file, use the analyze endpoint instead
-      if (file) {
-        endpoint = ENDPOINTS.ANALYZE;
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('prompt', text);
-        body = formData;
-      }
-
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        body: file ? body : JSON.stringify(body),
-        headers: file ? {} : {
-          'Content-Type': 'application/json'
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`Request failed with status ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      setMessages(prev => [...prev, {
-        text: data.response || data.analysis,
-        sender: 'bot'
-      }]);
-    } catch (err) {
-      console.error('Error in sendMessage:', err);
-      setError(err.message || 'Failed to get response');
-      setMessages(prev => prev.slice(0, -1));
-    } finally {
-      setLoading(false);
-    }
+    setFile(file);
+    handleFileUpload(file);
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!input.trim()) return;
-    await sendMessage(input.trim());
-  };
+    if (!input.trim() || loading) return;
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+    const userMessage = input.trim();
+    setInput('');
+    setLoading(true);
+    setError(null);
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    setMessages(prev => [...prev, {
+      sender: 'user',
+      text: userMessage
+    }]);
+
+    try {
+      const response = await fetch('http://localhost:5001/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message: userMessage }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to get response');
+      }
+
+      const data = await response.json();
+      
+      setMessages(prev => [...prev, {
+        sender: 'bot',
+        text: data.response
+      }]);
+    } catch (error) {
+      console.error('Chat error:', error);
+      setError('Failed to get response');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="chat-container">
@@ -279,4 +190,4 @@ const Chat = () => {
   );
 };
 
-export default Chat;
+export default Chat; 
